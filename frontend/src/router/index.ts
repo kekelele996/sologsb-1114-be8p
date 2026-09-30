@@ -21,6 +21,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '测点读数' }
   },
   {
+    path: '/adjust',
+    name: 'adjust',
+    component: () => import('@/pages/AdjustPage.vue'),
+    meta: { title: '导线平差' }
+  },
+  {
     path: '/sketch',
     name: 'sketch',
     component: () => import('@/pages/SketchPage.vue'),

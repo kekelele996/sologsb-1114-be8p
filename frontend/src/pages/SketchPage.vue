@@ -5,17 +5,20 @@ import type { Sketch, Station } from '@/types'
 import BearingInput from '@/components/common/BearingInput.vue'
 import GridCanvas from '@/components/common/GridCanvas.vue'
 import { useStore } from '@/hooks/usePersistentStore'
+import { adjustmentStore } from '@/stores/adjustmentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { sketchStore } from '@/stores/sketchStore'
-import { toRadians } from '@/utils/survey'
+import { computeReadingHash, orderTraversePoints } from '@/utils/surveyAdjust'
+import { numberToStake, toRadians } from '@/utils/survey'
 import { uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
 const sketchState = useStore(sketchStore)
+const adjustmentState = useStore(adjustmentStore)
 
 const CANVAS_W = 760
 const CANVAS_H = 440
@@ -70,6 +73,21 @@ const segmentStations = computed<Station[]>(() =>
     .sort((a, b) => Number((a.code.match(/\d+/) ?? ['0'])[0]) - Number((b.code.match(/\d+/) ?? ['0'])[0]))
 )
 
+/** 当前洞穴采用的平差成果（读数变动后为 null，草图随之恢复按读数绘制） */
+const currentRun = computed(() => {
+  if (!selectedCaveId.value) return null
+  const segs = segmentState.segments.filter((segment) => segment.caveId === selectedCaveId.value)
+  const all = stationState.stations.filter((station) => segs.some((seg) => seg.id === station.segmentId))
+  const points = orderTraversePoints(segs, all)
+  return adjustmentState.currentForCave(selectedCaveId.value, computeReadingHash(points))
+})
+
+/** 草图锚点采用值：平差后用调整里程，否则用现场桩号 */
+function effectiveAnchor(sketch: Sketch): string {
+  const segAdj = currentRun.value?.segmentAdjustments.find((item) => item.segmentId === sketch.segmentId)
+  return segAdj ? numberToStake(segAdj.startChainage) : sketch.anchorStake
+}
+
 /** 测点折线：以起点为原点，按方位角/水平距投影到平面坐标 */
 interface PlotPoint {
   station: Station
@@ -78,13 +96,29 @@ interface PlotPoint {
 }
 
 const rawPoints = computed<{ x: number; y: number; station: Station }[]>(() => {
+  const adjMap = new Map<string, { east: number; north: number }>()
+  if (currentRun.value) {
+    for (const item of currentRun.value.stationAdjustments) {
+      adjMap.set(item.stationId, { east: item.east, north: item.north })
+    }
+  }
   const points: { x: number; y: number; station: Station }[] = []
   let east = 0
   let north = 0
+  const base = toRadians(baseBearing.value)
+  const cosB = Math.cos(base)
+  const sinB = Math.sin(base)
   for (const station of segmentStations.value) {
-    const bearing = toRadians(station.bearing - baseBearing.value)
-    east += station.horizontalDistance * Math.sin(bearing)
-    north += station.horizontalDistance * Math.cos(bearing)
+    const adj = adjMap.get(station.id)
+    if (adj) {
+      // 采用调整后坐标，并按草图基准方位旋转到图纸朝上
+      east = adj.east * cosB - adj.north * sinB
+      north = adj.north * cosB + adj.east * sinB
+    } else {
+      const bearing = toRadians(station.bearing - baseBearing.value)
+      east += station.horizontalDistance * Math.sin(bearing)
+      north += station.horizontalDistance * Math.cos(bearing)
+    }
     points.push({ x: east, y: north, station })
   }
   return points
@@ -201,6 +235,8 @@ async function removeSketch(sketch: Sketch): Promise<void> {
       </el-select>
       <el-tag effect="plain">测点 {{ segmentStations.length }} 个</el-tag>
       <el-tag effect="plain">草图 {{ segmentSketches.length }} 张</el-tag>
+      <el-tag v-if="currentRun" type="success" effect="dark">已采用平差坐标</el-tag>
+      <el-tag v-else type="info" effect="plain">按读数绘制（未平差）</el-tag>
       <div class="base-bearing">
         <BearingInput v-model="baseBearing" kind="bearing" label="草图基准方位" @invalid="(msg: string) => ElMessage.warning(msg)" />
       </div>
@@ -293,6 +329,11 @@ async function removeSketch(sketch: Sketch): Promise<void> {
       </el-table-column>
       <el-table-column prop="author" label="绘制人" width="100" />
       <el-table-column prop="anchorStake" label="锚点桩号" width="130" />
+      <el-table-column label="平差后锚点" width="130">
+        <template #default="{ row }: { row: Sketch }">
+          <span :class="{ 'adj-anchor': currentRun }">{{ effectiveAnchor(row) }}</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="imageNote" label="图片数据说明" min-width="200" show-overflow-tooltip />
       <el-table-column label="操作" width="130" fixed="right">
         <template #default="{ row }: { row: Sketch }">
@@ -322,5 +363,9 @@ async function removeSketch(sketch: Sketch): Promise<void> {
   display: flex;
   gap: 8px;
   padding-left: 90px;
+}
+.adj-anchor {
+  color: #2f6f8f;
+  font-weight: 600;
 }
 </style>

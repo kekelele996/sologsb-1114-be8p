@@ -3,3 +3,9 @@ export { SEGMENT_TYPES, SEGMENT_TYPE_COLORS, segmentLength } from './segment'
 export type { Segment, SegmentType } from './segment'
 export type { Station, ClosureResult } from './station'
 export type { Sketch, MergeItem } from './sketch'
+export type {
+  AdjustmentRun,
+  StationAdjustment,
+  SegmentAdjustment,
+  StationProblem
+} from './adjustment'

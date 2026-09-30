@@ -5,15 +5,18 @@ import type { Segment, SegmentType } from '@/types'
 import { SEGMENT_TYPES, segmentLength } from '@/types'
 import SegmentTag from '@/components/common/SegmentTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
+import { adjustmentStore } from '@/stores/adjustmentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
+import { computeReadingHash, orderTraversePoints } from '@/utils/surveyAdjust'
 import { stakeRangeOverlap, stakeToNumber } from '@/utils/survey'
 import { uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
+const adjustmentState = useStore(adjustmentStore)
 
 const filterCaveId = ref<string>('')
 const filterType = ref<SegmentType | ''>('')
@@ -51,9 +54,19 @@ const filtered = computed(() =>
   })
 )
 
-const totalLength = computed(() =>
-  Math.round(filtered.value.reduce((sum, segment) => sum + segmentLength(segment), 0) * 10) / 10
-)
+const totalLength = computed(() => {
+  let total = 0
+  for (const segment of filtered.value) {
+    const adjusted = adjustedLengthOf(segment)
+    if (adjusted !== null) {
+      total += adjusted
+    } else {
+      // 无平差成果时：读数合计（旧长度）优先，桩号长度兜底
+      total += measuredLengthOf(segment.id) || segmentLength(segment)
+    }
+  }
+  return Math.round(total * 10) / 10
+})
 
 function caveName(caveId: string): string {
   return caveState.caves.find((cave) => cave.id === caveId)?.name ?? '未归属洞穴'
@@ -61,6 +74,31 @@ function caveName(caveId: string): string {
 
 function stationCount(segmentId: string): number {
   return stationState.stations.filter((station) => station.segmentId === segmentId).length
+}
+
+/** 某洞穴当前采用的平差成果（读数变动后返回 null） */
+function runForCave(caveId: string) {
+  const segs = segmentState.segments.filter((segment) => segment.caveId === caveId)
+  const sts = stationState.stations.filter((station) => segs.some((seg) => seg.id === station.segmentId))
+  const points = orderTraversePoints(segs, sts)
+  return adjustmentState.currentForCave(caveId, computeReadingHash(points))
+}
+
+/** 实测长度（旧）：洞段内各站水平距合计，读数改动即重算 */
+function measuredLengthOf(segmentId: string): number {
+  return (
+    Math.round(
+      stationState.stations
+        .filter((station) => station.segmentId === segmentId)
+        .reduce((sum, station) => sum + (station.horizontalDistance || 0), 0) * 1000
+    ) / 1000
+  )
+}
+
+/** 调整后长度（成果采用值）；无平差成果时返回 null */
+function adjustedLengthOf(segment: Segment): number | null {
+  const run = runForCave(segment.caveId)
+  return run?.segmentAdjustments.find((item) => item.segmentId === segment.id)?.adjustedLength ?? null
 }
 
 function resetForm(): void {
@@ -192,7 +230,7 @@ async function removeSegment(segment: Segment): Promise<void> {
       <el-button type="primary" plain @click="applyBatchType">批量调整类型</el-button>
       <el-button @click="applyBatchClosed(true)">标记闭合</el-button>
       <el-button @click="applyBatchClosed(false)">取消闭合</el-button>
-      <el-tag type="info" effect="plain">命中共 {{ filtered.length }} 段 · 合计 {{ totalLength }} m</el-tag>
+      <el-tag type="info" effect="plain">命中共 {{ filtered.length }} 段 · 合计 {{ totalLength }} m（平差后）</el-tag>
     </div>
 
     <el-table
@@ -219,7 +257,15 @@ async function removeSegment(segment: Segment): Promise<void> {
       <el-table-column label="桩号区间" min-width="200">
         <template #default="{ row }: { row: Segment }">
           <span class="mono">{{ row.startStake }} → {{ row.endStake }}</span>
-          <div class="muted">长度 {{ segmentLength(row) }} m</div>
+          <div class="muted">桩号长度 {{ segmentLength(row) }} m</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="实测 → 平差长度(m)" width="180">
+        <template #default="{ row }: { row: Segment }">
+          <div class="len-row">
+            <span class="muted">实测 {{ measuredLengthOf(row.id) || '—' }}</span>
+            <span class="adj">平差 {{ adjustedLengthOf(row) !== null ? adjustedLengthOf(row)?.toFixed(3) : '—' }}</span>
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="平均宽×高(m)" width="140">
@@ -312,5 +358,15 @@ async function removeSegment(segment: Segment): Promise<void> {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+.len-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+.len-row .adj {
+  color: #2f6f8f;
+  font-weight: 600;
 }
 </style>

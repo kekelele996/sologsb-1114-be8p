@@ -7,12 +7,14 @@ import GridCanvas from '@/components/common/GridCanvas.vue'
 import SegmentTag from '@/components/common/SegmentTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { useClosureCheck } from '@/hooks/useClosureCheck'
+import { adjustmentStore } from '@/stores/adjustmentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { sketchStore } from '@/stores/sketchStore'
+import { computeReadingHash, orderTraversePoints } from '@/utils/surveyAdjust'
 import { downloadCsv } from '@/utils/export'
-import { stakeToNumber } from '@/utils/survey'
+import { numberToStake, stakeToNumber } from '@/utils/survey'
 
 const CANVAS_W = 780
 const CANVAS_H = 300
@@ -23,6 +25,7 @@ const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
 const sketchState = useStore(sketchStore)
+const adjustmentState = useStore(adjustmentStore)
 
 const selectedCaveId = ref<string>(caveState.caves[0]?.id ?? '')
 const draggingId = ref<string | null>(null)
@@ -46,6 +49,21 @@ const mergeSketches = computed<Sketch[]>(() =>
 function segmentOf(sketch: Sketch): string {
   const segment = segmentState.segments.find((item) => item.id === sketch.segmentId)
   return segment ? segment.code : '未归属'
+}
+
+/** 当前洞穴采用的平差成果（读数变动后为 null，图幅锚点恢复按现场桩号） */
+const currentRun = computed(() => {
+  if (!selectedCaveId.value) return null
+  const segs = segmentState.segments.filter((segment) => segment.caveId === selectedCaveId.value)
+  const all = stationState.stations.filter((station) => segs.some((seg) => seg.id === station.segmentId))
+  const points = orderTraversePoints(segs, all)
+  return adjustmentState.currentForCave(selectedCaveId.value, computeReadingHash(points))
+})
+
+/** 图幅对齐锚点：平差后用调整里程，否则用现场桩号 */
+function effectiveAnchor(sketch: Sketch): string {
+  const segAdj = currentRun.value?.segmentAdjustments.find((item) => item.segmentId === sketch.segmentId)
+  return segAdj ? numberToStake(segAdj.startChainage) : sketch.anchorStake
 }
 
 function widthOf(sketch: Sketch): number {
@@ -86,24 +104,25 @@ const caveStations = computed(() =>
 )
 const { result: closureResult } = useClosureCheck(caveStations)
 
-/** 按桩号锚点自动吸附：以最小锚点桩号为原点，按桩号差换算横向偏移 */
+/** 按桩号锚点自动吸附：以最小锚点桩号为原点，按桩号差换算横向偏移；平差后采用调整后锚点 */
 function autoAlign(): void {
   const list = mergeSketches.value
   if (list.length === 0) {
     ElMessage.warning('当前洞穴暂无可拼合草图')
     return
   }
-  const base = Math.min(...list.map((sketch) => stakeToNumber(sketch.anchorStake)))
+  const anchors = list.map((sketch) => effectiveAnchor(sketch))
+  const base = Math.min(...anchors.map((anchor) => stakeToNumber(anchor)))
   const logs: string[] = []
-  list.forEach((sketch) => {
-    const stake = stakeToNumber(sketch.anchorStake)
+  list.forEach((sketch, index) => {
+    const stake = stakeToNumber(anchors[index])
     const target = Math.round((stake - base) * PX_PER_METER)
     offsets[sketch.id] = target
     snapped[sketch.id] = true
-    logs.push(`${sketch.code} 锚点 ${sketch.anchorStake} → 偏移 ${target}px`)
+    logs.push(`${sketch.code} 锚点 ${anchors[index]} → 偏移 ${target}px`)
   })
   snapLog.value = logs
-  ElMessage.success(`已按桩号锚点吸附 ${list.length} 张图幅`)
+  ElMessage.success(`已按桩号锚点吸附 ${list.length} 张图幅${currentRun.value ? '（采用平差后锚点）' : ''}`)
 }
 
 function onMouseDown(sketch: Sketch, event: MouseEvent): void {
@@ -156,7 +175,7 @@ const mergeRows = computed<MergeRow[]>(() =>
     order: index + 1,
     code: sketch.code,
     segment: segmentOf(sketch),
-    anchorStake: sketch.anchorStake,
+    anchorStake: effectiveAnchor(sketch),
     offset: offsets[sketch.id] ?? 0,
     snapped: snapped[sketch.id] ?? false
   }))
@@ -210,6 +229,8 @@ function exportMergeTable(): void {
       </el-select>
       <el-tag effect="plain">图幅 {{ mergeSketches.length }} 张</el-tag>
       <el-tag effect="plain">总宽 {{ totalWidth }} px</el-tag>
+      <el-tag v-if="currentRun" type="success" effect="dark">锚点采用平差成果</el-tag>
+      <el-tag v-else type="info" effect="plain">锚点按现场桩号</el-tag>
       <div class="seg-tags">
         <SegmentTag
           v-for="segment in caveSegments"

@@ -4,14 +4,17 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Cave } from '@/types'
 import { segmentLength } from '@/types'
 import { useStore } from '@/hooks/usePersistentStore'
+import { adjustmentStore } from '@/stores/adjustmentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
+import { computeReadingHash, orderTraversePoints } from '@/utils/surveyAdjust'
 import { uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
+const adjustmentState = useStore(adjustmentStore)
 
 const showArchived = ref(false)
 const dialogVisible = ref(false)
@@ -39,7 +42,15 @@ function segmentsOf(caveId: string): typeof segmentState.segments {
 }
 
 function totalLength(caveId: string): number {
-  return Math.round(segmentsOf(caveId).reduce((sum, item) => sum + segmentLength(item), 0) * 10) / 10
+  // 优先采用平差成果（调整后总长）；无成果时用读数合计（旧长度）；再兜底桩号长度
+  const segs = segmentsOf(caveId)
+  const sts = stationState.stations.filter((station) => segs.some((seg) => seg.id === station.segmentId))
+  const points = orderTraversePoints(segs, sts)
+  const run = adjustmentState.currentForCave(caveId, computeReadingHash(points))
+  if (run) return Math.round(run.totalLength * 10) / 10
+  const measured = sts.reduce((sum, station) => sum + (station.horizontalDistance || 0), 0)
+  if (measured > 0) return Math.round(measured * 10) / 10
+  return Math.round(segs.reduce((sum, item) => sum + segmentLength(item), 0) * 10) / 10
 }
 
 function lastSurveyDate(caveId: string): string {

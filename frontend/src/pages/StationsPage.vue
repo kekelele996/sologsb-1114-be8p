@@ -7,15 +7,18 @@ import ClosureBadge from '@/components/common/ClosureBadge.vue'
 import SegmentTag from '@/components/common/SegmentTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { useClosureCheck } from '@/hooks/useClosureCheck'
+import { adjustmentStore } from '@/stores/adjustmentStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { caveStore } from '@/stores/caveStore'
+import { computeReadingHash, orderTraversePoints } from '@/utils/surveyAdjust'
 import { computeHorizontal, computeVertical, formatDms, isValidBearing, isValidDip } from '@/utils/survey'
 import { nextCode, uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
+const adjustmentState = useStore(adjustmentStore)
 
 const selectedCaveId = ref<string>(caveState.caves[0]?.id ?? '')
 const selectedSegmentId = ref<string>('')
@@ -65,6 +68,20 @@ const pendingStation = computed<Station>(() => ({
 
 const closureInput = computed<Station[]>(() => [...segmentStations.value, pendingStation.value])
 const { result: closureResult, over: closureOver } = useClosureCheck(closureInput)
+
+/** 平差成果状态：读数改动后提示重算，失败提示重试 */
+const adjustmentStatus = computed<'applied' | 'stale' | 'failed' | 'none'>(() => {
+  if (!selectedCaveId.value) return 'none'
+  const segs = segmentState.segments.filter((segment) => segment.caveId === selectedCaveId.value)
+  const all = stationState.stations.filter((station) => segs.some((seg) => seg.id === station.segmentId))
+  const points = orderTraversePoints(segs, all)
+  const hash = computeReadingHash(points)
+  if (adjustmentState.currentForCave(selectedCaveId.value, hash)) return 'applied'
+  const latest = adjustmentState.latestForCave(selectedCaveId.value)
+  if (latest?.status === 'failed') return 'failed'
+  if (latest?.status === 'success') return 'stale'
+  return 'none'
+})
 
 const previewHorizontal = computed(() => computeHorizontal(form.dip, form.slopeDistance))
 const previewVertical = computed(() => computeVertical(form.dip, form.slopeDistance))
@@ -292,6 +309,42 @@ async function removeStation(station: Station): Promise<void> {
       title="闭合差已超限"
       description="当前洞段累计闭合差超过阈值，建议复测异常测点或对读数做误差分配。"
     />
+    <el-alert
+      v-if="adjustmentStatus === 'stale'"
+      class="alert"
+      type="warning"
+      :closable="false"
+      title="读数已变动，平差成果待重算"
+      description="旧长度与总长已按读数重算，洞段、实测总长、草图锚点与图幅偏移需随平差成果一起更新。"
+    >
+      <div class="alert-actions">
+        <el-button size="small" type="warning" @click="$router.push('/adjust')">去重新分配闭合差</el-button>
+      </div>
+    </el-alert>
+    <el-alert
+      v-if="adjustmentStatus === 'failed'"
+      class="alert"
+      type="error"
+      :closable="false"
+      title="上次闭合差分配失败"
+      description="有测站读数不符合要求分不下去，已逐站记录原因；修正读数后可从上一版重试。"
+    >
+      <div class="alert-actions">
+        <el-button size="small" type="danger" @click="$router.push('/adjust')">去查看问题站并重试</el-button>
+      </div>
+    </el-alert>
+    <el-alert
+      v-if="adjustmentStatus === 'applied'"
+      class="alert"
+      type="success"
+      :closable="false"
+      title="已采用平差成果"
+      description="洞段长度与实测总长采用分配后的值，现场读数原样保留；调整量已另存。"
+    >
+      <div class="alert-actions">
+        <el-button size="small" type="success" plain @click="$router.push('/adjust')">查看平差成果</el-button>
+      </div>
+    </el-alert>
 
     <h3 class="section-title">本洞段读数（{{ segmentStations.length }} 站）</h3>
     <el-table :data="segmentStations" border stripe :row-class-name="rowClassName">
@@ -352,6 +405,9 @@ async function removeStation(station: Station): Promise<void> {
 }
 .alert {
   margin-bottom: 12px;
+}
+.alert-actions {
+  margin-top: 8px;
 }
 :deep(.abnormal-row) {
   background: #fdf2f2 !important;

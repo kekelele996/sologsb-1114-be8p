@@ -6,6 +6,7 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from '@/App.vue'
 import router from '@/router'
 import { seedDemoData, stampDbVersion } from '@/hooks/usePersistentStore'
+import { adjustmentStore } from '@/stores/adjustmentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
@@ -19,6 +20,7 @@ async function bootstrap(): Promise<void> {
   await segmentStore.getState().hydrate()
   await stationStore.getState().hydrate()
   await sketchStore.getState().hydrate()
+  await adjustmentStore.getState().hydrate()
 }
 
 const app = createApp(App)
