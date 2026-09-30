@@ -9,13 +9,15 @@ import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { sketchStore } from '@/stores/sketchStore'
-import { toRadians } from '@/utils/survey'
+import { adjustmentStore } from '@/stores/adjustmentStore'
+import { anchorChainage, chainageToPoint, round, sortStationsByCode, toRadians } from '@/utils/survey'
 import { uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
 const sketchState = useStore(sketchStore)
+const adjustmentState = useStore(adjustmentStore)
 
 const CANVAS_W = 760
 const CANVAS_H = 440
@@ -65,9 +67,12 @@ watch(
 )
 
 const segmentStations = computed<Station[]>(() =>
-  stationState.stations
-    .filter((station) => station.segmentId === selectedSegmentId.value)
-    .sort((a, b) => Number((a.code.match(/\d+/) ?? ['0'])[0]) - Number((b.code.match(/\d+/) ?? ['0'])[0]))
+  sortStationsByCode(stationState.stations.filter((station) => station.segmentId === selectedSegmentId.value))
+)
+
+/** 当前洞段是否存在有效分配成果（草图折线优先使用成果坐标） */
+const segmentAdjusted = computed(() =>
+  adjustmentState.records.some((record) => record.active && record.segmentId === selectedSegmentId.value)
 )
 
 /** 测点折线：以起点为原点，按方位角/水平距投影到平面坐标 */
@@ -77,7 +82,18 @@ interface PlotPoint {
   y: number
 }
 
+// 已分配时直接使用成果坐标（基准方位仅旋转显示）；未分配时按原读数实时投影
 const rawPoints = computed<{ x: number; y: number; station: Station }[]>(() => {
+  if (segmentAdjusted.value) {
+    const bearing = toRadians(-baseBearing.value)
+    const cos = Math.cos(bearing)
+    const sin = Math.sin(bearing)
+    return segmentStations.value.map((station) => ({
+      x: round((station.adjusted?.east ?? 0) * cos - (station.adjusted?.north ?? 0) * sin, 3),
+      y: round((station.adjusted?.east ?? 0) * sin + (station.adjusted?.north ?? 0) * cos, 3),
+      station
+    }))
+  }
   const points: { x: number; y: number; station: Station }[] = []
   let east = 0
   let north = 0
@@ -90,10 +106,38 @@ const rawPoints = computed<{ x: number; y: number; station: Station }[]>(() => {
   return points
 })
 
+/** 草图锚点：锚点桩号换算到导线上的平面位置（读数改动后随之更新） */
+interface AnchorPlot {
+  sketch: Sketch
+  x: number
+  y: number
+}
+
+const anchorPlots = computed<AnchorPlot[]>(() => {
+  const segment = currentSegment.value
+  if (!segment || segmentStations.value.length === 0) return []
+  return segmentSketches.value.map((sketch) => {
+    const chainage = anchorChainage(sketch.anchorStake, segment.startStake, segmentStations.value, true)
+    const point = chainageToPoint(segmentStations.value, chainage, true)
+    // 已分配时坐标再按基准方位旋转；未分配时 chainageToPoint 用的就是原读数坐标
+    if (segmentAdjusted.value) {
+      const bearing = toRadians(-baseBearing.value)
+      return {
+        sketch,
+        x: round(point.east * Math.cos(bearing) - point.north * Math.sin(bearing), 3),
+        y: round(point.east * Math.sin(bearing) + point.north * Math.cos(bearing), 3)
+      }
+    }
+    return { sketch, x: point.east, y: point.north }
+  })
+})
+
 const plotScale = computed(() => {
   const xs = rawPoints.value.map((p) => Math.abs(p.x))
   const ys = rawPoints.value.map((p) => Math.abs(p.y))
-  const maxExtent = Math.max(1, ...xs, ...ys)
+  const anchorXs = anchorPlots.value.map((p) => Math.abs(p.x))
+  const anchorYs = anchorPlots.value.map((p) => Math.abs(p.y))
+  const maxExtent = Math.max(1, ...xs, ...ys, ...anchorXs, ...anchorYs)
   return Math.min((CANVAS_W - PAD * 2) / maxExtent, (CANVAS_H - PAD * 2) / maxExtent)
 })
 
@@ -102,6 +146,15 @@ const plotPoints = computed<PlotPoint[]>(() =>
     station: point.station,
     x: PAD + point.x * plotScale.value,
     y: CANVAS_H - PAD - point.y * plotScale.value
+  }))
+)
+
+/** 锚点屏幕坐标（与折线同一缩放） */
+const anchorScreen = computed(() =>
+  anchorPlots.value.map((anchor) => ({
+    sketch: anchor.sketch,
+    x: PAD + anchor.x * plotScale.value,
+    y: CANVAS_H - PAD - anchor.y * plotScale.value
   }))
 )
 
@@ -217,6 +270,27 @@ async function removeSketch(sketch: Sketch): Promise<void> {
         <g v-if="plotPoints.length > 1">
           <polyline :points="polyline" fill="none" stroke="#2f6f8f" stroke-width="2.5" stroke-linejoin="round" />
         </g>
+        <g v-for="anchor in anchorScreen" :key="`anchor-${anchor.sketch.id}`">
+          <line
+            :x1="anchor.x - 7"
+            :y1="anchor.y - 7"
+            :x2="anchor.x + 7"
+            :y2="anchor.y + 7"
+            stroke="#c0392b"
+            stroke-width="2"
+          />
+          <line
+            :x1="anchor.x + 7"
+            :y1="anchor.y - 7"
+            :x2="anchor.x - 7"
+            :y2="anchor.y + 7"
+            stroke="#c0392b"
+            stroke-width="2"
+          />
+          <text :x="anchor.x + 9" :y="anchor.y + 14" font-size="10" fill="#c0392b">
+            {{ anchor.sketch.code }} 锚点 {{ anchor.sketch.anchorStake }}
+          </text>
+        </g>
         <g v-for="(point, index) in plotPoints" :key="point.station.id">
           <circle :cx="point.x" :cy="point.y" r="4.5" fill="#1f3a4d" />
           <line
@@ -246,8 +320,10 @@ async function removeSketch(sketch: Sketch): Promise<void> {
         <template #legend>
           <span>● 测点</span>
           <span>▸ 倾角方向</span>
+          <span>✕ 草图锚点</span>
           <span>深色线 = 5 格</span>
           <span>1 格 = 1 m</span>
+          <span v-if="segmentAdjusted">折线使用分配后成果坐标</span>
         </template>
       </GridCanvas>
 

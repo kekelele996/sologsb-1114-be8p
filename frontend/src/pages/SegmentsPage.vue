@@ -2,18 +2,20 @@
 import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Segment, SegmentType } from '@/types'
-import { SEGMENT_TYPES, segmentLength } from '@/types'
+import { SEGMENT_TYPES, segmentLength, segmentResultLength } from '@/types'
 import SegmentTag from '@/components/common/SegmentTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
+import { adjustmentStore } from '@/stores/adjustmentStore'
 import { stakeRangeOverlap, stakeToNumber } from '@/utils/survey'
 import { uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
+const adjustmentState = useStore(adjustmentStore)
 
 const filterCaveId = ref<string>('')
 const filterType = ref<SegmentType | ''>('')
@@ -52,7 +54,7 @@ const filtered = computed(() =>
 )
 
 const totalLength = computed(() =>
-  Math.round(filtered.value.reduce((sum, segment) => sum + segmentLength(segment), 0) * 10) / 10
+  Math.round(filtered.value.reduce((sum, segment) => sum + segmentResultLength(segment), 0) * 10) / 10
 )
 
 function caveName(caveId: string): string {
@@ -61,6 +63,11 @@ function caveName(caveId: string): string {
 
 function stationCount(segmentId: string): number {
   return stationState.stations.filter((station) => station.segmentId === segmentId).length
+}
+
+/** 洞段是否有当前有效的分配成果 */
+function isAdjusted(segmentId: string): boolean {
+  return adjustmentState.records.some((record) => record.active && record.segmentId === segmentId)
 }
 
 function resetForm(): void {
@@ -122,7 +129,9 @@ async function submit(): Promise<void> {
     avgHeight: Number(form.avgHeight) || 0,
     slopeTrend: form.slopeTrend.trim(),
     closed: form.closed,
-    sketchNo: form.sketchNo.trim()
+    sketchNo: form.sketchNo.trim(),
+    surveyedLength: existing?.surveyedLength ?? null,
+    surveyedAt: existing?.surveyedAt ?? ''
   }
   await segmentStore.getState().save(segment)
   dialogVisible.value = false
@@ -192,7 +201,7 @@ async function removeSegment(segment: Segment): Promise<void> {
       <el-button type="primary" plain @click="applyBatchType">批量调整类型</el-button>
       <el-button @click="applyBatchClosed(true)">标记闭合</el-button>
       <el-button @click="applyBatchClosed(false)">取消闭合</el-button>
-      <el-tag type="info" effect="plain">命中共 {{ filtered.length }} 段 · 合计 {{ totalLength }} m</el-tag>
+      <el-tag type="info" effect="plain">命中共 {{ filtered.length }} 段 · 实测合计 {{ totalLength }} m</el-tag>
     </div>
 
     <el-table
@@ -216,10 +225,15 @@ async function removeSegment(segment: Segment): Promise<void> {
           <SegmentTag :type="row.type" :closed="row.closed" size="small" />
         </template>
       </el-table-column>
-      <el-table-column label="桩号区间" min-width="200">
+      <el-table-column label="桩号区间 / 长度" min-width="230">
         <template #default="{ row }: { row: Segment }">
           <span class="mono">{{ row.startStake }} → {{ row.endStake }}</span>
-          <div class="muted">长度 {{ segmentLength(row) }} m</div>
+          <div>
+            <b>实测长度 {{ segmentResultLength(row) }} m</b>
+            <el-tag v-if="isAdjusted(row.id)" type="success" size="small" effect="plain" class="len-tag">分配成果</el-tag>
+            <el-tag v-else-if="row.surveyedLength !== null" type="warning" size="small" effect="plain" class="len-tag">原读数累计</el-tag>
+            <el-tag v-else type="info" size="small" effect="plain" class="len-tag">桩号设计 {{ segmentLength(row) }} m</el-tag>
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="平均宽×高(m)" width="140">
@@ -312,5 +326,8 @@ async function removeSegment(segment: Segment): Promise<void> {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+.len-tag {
+  margin-left: 6px;
 }
 </style>

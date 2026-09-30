@@ -32,9 +32,13 @@ export interface Segment {
   closed: boolean
   /** 草图序号 */
   sketchNo: string
+  /** 实测洞段长度（米）：由各站成果（调整后水平距）累计，读数/分配改动后重算 */
+  surveyedLength: number | null
+  /** 最近一次长度重算时间（ISO 字符串） */
+  surveyedAt: string
 }
 
-/** 洞段长度 = 起止桩号之差（米） */
+/** 桩号长度 = 起止桩号之差（米，设计值） */
 export function segmentLength(segment: Pick<Segment, 'startStake' | 'endStake'>): number {
   const toNumber = (stake: string): number => {
     const match = /(\d+)\s*\+\s*(\d+)/.exec(stake)
@@ -43,4 +47,14 @@ export function segmentLength(segment: Pick<Segment, 'startStake' | 'endStake'>)
     return Number.isFinite(plain) ? plain : 0
   }
   return Math.max(0, toNumber(segment.endStake) - toNumber(segment.startStake))
+}
+
+/**
+ * 洞段成果长度：优先取导线实测（调整后）长度；
+ * 尚未平差的洞段回落到桩号设计长度。
+ */
+export function segmentResultLength(segment: Segment): number {
+  return typeof segment.surveyedLength === 'number' && Number.isFinite(segment.surveyedLength)
+    ? segment.surveyedLength
+    : segmentLength(segment)
 }

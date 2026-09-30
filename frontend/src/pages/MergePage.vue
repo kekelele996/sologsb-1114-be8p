@@ -6,13 +6,13 @@ import ClosureBadge from '@/components/common/ClosureBadge.vue'
 import GridCanvas from '@/components/common/GridCanvas.vue'
 import SegmentTag from '@/components/common/SegmentTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
-import { useClosureCheck } from '@/hooks/useClosureCheck'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { sketchStore } from '@/stores/sketchStore'
+import { adjustmentStore } from '@/stores/adjustmentStore'
 import { downloadCsv } from '@/utils/export'
-import { stakeToNumber } from '@/utils/survey'
+import { anchorChainage, computeClosure, sortStationsByCode } from '@/utils/survey'
 
 const CANVAS_W = 780
 const CANVAS_H = 300
@@ -23,6 +23,7 @@ const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
 const sketchState = useStore(sketchStore)
+const adjustmentState = useStore(adjustmentStore)
 
 const selectedCaveId = ref<string>(caveState.caves[0]?.id ?? '')
 const draggingId = ref<string | null>(null)
@@ -78,33 +79,77 @@ watch(
   { immediate: true }
 )
 
-/** 洞段测点闭合差（拼合视图复用闭合差徽标） */
+/** 洞段测点闭合差（拼合视图复用闭合差徽标）：有成果时显示分配后残差 */
 const caveStations = computed(() =>
   stationState.stations.filter((station) =>
     caveSegments.value.some((segment) => segment.id === station.segmentId)
   )
 )
-const { result: closureResult } = useClosureCheck(caveStations)
+const hasAdjusted = computed(() =>
+  adjustmentState.records.some(
+    (record) => record.active && caveSegments.value.some((segment) => segment.id === record.segmentId)
+  )
+)
+const closureResult = computed(() => computeClosure(caveStations.value, 0.25, hasAdjusted.value))
 
-/** 按桩号锚点自动吸附：以最小锚点桩号为原点，按桩号差换算横向偏移 */
+/** 一张草图锚点沿其洞段导线的累计里程（米，用分配后成果，读数改动自动重算） */
+function sketchAnchorChainage(sketch: Sketch): number {
+  const segment = segmentState.segments.find((item) => item.id === sketch.segmentId)
+  if (!segment) return 0
+  const stations = sortStationsByCode(
+    stationState.stations.filter((station) => station.segmentId === segment.id)
+  )
+  return anchorChainage(sketch.anchorStake, segment.startStake, stations, true)
+}
+
+/** 按桩号锚点自动吸附：以各草图锚点沿导线的里程换算横向偏移 */
 function autoAlign(): void {
   const list = mergeSketches.value
   if (list.length === 0) {
     ElMessage.warning('当前洞穴暂无可拼合草图')
     return
   }
-  const base = Math.min(...list.map((sketch) => stakeToNumber(sketch.anchorStake)))
+  const chainages = list.map(sketchAnchorChainage)
+  const base = Math.min(...chainages)
   const logs: string[] = []
-  list.forEach((sketch) => {
-    const stake = stakeToNumber(sketch.anchorStake)
-    const target = Math.round((stake - base) * PX_PER_METER)
+  list.forEach((sketch, index) => {
+    const target = Math.round((chainages[index] - base) * PX_PER_METER)
     offsets[sketch.id] = target
     snapped[sketch.id] = true
-    logs.push(`${sketch.code} 锚点 ${sketch.anchorStake} → 偏移 ${target}px`)
+    logs.push(`${sketch.code} 锚点 ${sketch.anchorStake}（里程 ${round1(chainages[index])} m）→ 偏移 ${target}px`)
   })
   snapLog.value = logs
   ElMessage.success(`已按桩号锚点吸附 ${list.length} 张图幅`)
 }
+
+function round1(value: number): number {
+  return Math.round(value * 10) / 10
+}
+
+/**
+ * 读数/分配改动后，已吸附图幅按新里程自动重排；
+ * 用户手动拖动（未吸附）的图幅保持不动。
+ */
+watch(
+  [mergeSketches, caveStations],
+  () => {
+    const list = mergeSketches.value
+    if (list.length === 0) return
+    const anySnapped = list.some((sketch) => snapped[sketch.id])
+    if (!anySnapped) return
+    const chainages = list.map(sketchAnchorChainage)
+    const base = Math.min(...chainages)
+    const logs: string[] = []
+    list.forEach((sketch, index) => {
+      if (!snapped[sketch.id]) return
+      const target = Math.round((chainages[index] - base) * PX_PER_METER)
+      offsets[sketch.id] = target
+      logs.push(`${sketch.code} 锚点随成果重排 → 偏移 ${target}px`)
+    })
+    if (logs.length > 0) snapLog.value = logs
+  },
+  { deep: false }
+)
 
 function onMouseDown(sketch: Sketch, event: MouseEvent): void {
   draggingId.value = sketch.id

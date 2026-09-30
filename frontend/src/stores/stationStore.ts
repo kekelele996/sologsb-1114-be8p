@@ -10,7 +10,16 @@ export interface StationState {
   remove: (id: string) => Promise<void>
 }
 
-export const stationStore = createStore<StationState>((set, get) => ({
+/**
+ * 读数落库后核对分配版本并重算长度：
+ * 动态引入避免与 adjustmentStore 形成模块循环依赖。
+ */
+async function reconcileAfterReadingsChange(): Promise<void> {
+  const { adjustmentStore } = await import('@/stores/adjustmentStore')
+  await adjustmentStore.getState().reconcile()
+}
+
+export const stationStore = createStore<StationState>((set) => ({
   stations: [],
   loaded: false,
   hydrate: async () => {
@@ -20,10 +29,11 @@ export const stationStore = createStore<StationState>((set, get) => ({
   },
   save: async (station) => {
     await syncPut<Station>(db.stations, station)
-    await get().hydrate()
+    // 读数一改动：旧分配按指纹作废，长度/总长/草图锚点/图幅偏移随之重算
+    await reconcileAfterReadingsChange()
   },
   remove: async (id) => {
     await syncDelete(db.stations, id)
-    await get().hydrate()
+    await reconcileAfterReadingsChange()
   }
 }))

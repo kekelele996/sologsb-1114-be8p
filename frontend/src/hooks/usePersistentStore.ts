@@ -1,23 +1,24 @@
 import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
-import type { Cave, Segment, Sketch, Station } from '@/types'
+import type { AdjustmentRecord, Cave, Segment, Sketch, Station } from '@/types'
 import { computeHorizontal, computeVertical } from '@/utils/survey'
 
 /** IndexedDB 数据结构版本号（升级迁移时使用） */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：洞穴 / 洞段 / 测点 / 草图 四张表 + 元数据表 */
+/** Dexie 封装：洞穴 / 洞段 / 测点 / 草图 / 分配版本 五张表 + 元数据表 */
 class CaveSurveyDb extends Dexie {
   caves!: Table<Cave, string>
   segments!: Table<Segment, string>
   stations!: Table<Station, string>
   sketches!: Table<Sketch, string>
+  adjustments!: Table<AdjustmentRecord, string>
   meta!: Table<MetaRow, string>
 
   constructor() {
@@ -30,7 +31,7 @@ class CaveSurveyDb extends Dexie {
       meta: 'key'
     })
     // v2：旧版测点记录缺少水平距/垂距，迁移时由斜距 + 倾角补齐
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         caves: 'id, name, region, archived',
         segments: 'id, caveId, code, type',
@@ -49,6 +50,39 @@ class CaveSurveyDb extends Dexie {
             if (!Number.isFinite(station.verticalDistance)) {
               station.verticalDistance = computeVertical(station.dip, station.slopeDistance)
             }
+          })
+      })
+    // v3：新增闭合差分配版本表；洞穴/洞段补实测长度字段，测点补复测标记与调整成果
+    this.version(SCHEMA_VERSION)
+      .stores({
+        caves: 'id, name, region, archived',
+        segments: 'id, caveId, code, type',
+        stations: 'id, segmentId, code, date',
+        sketches: 'id, segmentId, code, mergeOrder',
+        adjustments: 'id, segmentId, version, active',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<Cave, string>('caves')
+          .toCollection()
+          .modify((cave) => {
+            cave.surveyedLength = null
+            cave.surveyedAt = ''
+          })
+        await tx
+          .table<Segment, string>('segments')
+          .toCollection()
+          .modify((segment) => {
+            segment.surveyedLength = null
+            segment.surveyedAt = ''
+          })
+        await tx
+          .table<Station, string>('stations')
+          .toCollection()
+          .modify((station) => {
+            station.isRemeasured = false
+            station.adjusted = null
           })
       })
   }
@@ -97,7 +131,7 @@ export function useStore<T extends object>(store: StoreApi<T>): T {
 
 /**
  * 首次打开时写入一套示例洞穴数据，保证各页面进入即有事可做。
- * 只在四张表都为空时执行一次。
+ * 只在五张表都为空时执行一次。
  */
 export async function seedDemoData(): Promise<void> {
   const caveCount = await db.caves.count()
@@ -122,6 +156,8 @@ export async function seedDemoData(): Promise<void> {
     surveyor: '陆昀',
     climateNote: '洞内 16.2℃，相对湿度 94%，中段有滴水',
     archived: false,
+    surveyedLength: null,
+    surveyedAt: '',
     createdAt: new Date().toISOString()
   })
 
@@ -137,7 +173,9 @@ export async function seedDemoData(): Promise<void> {
       avgHeight: 3.1,
       slopeTrend: '缓升 3°',
       closed: false,
-      sketchNo: 'S-01'
+      sketchNo: 'S-01',
+      surveyedLength: null,
+      surveyedAt: ''
     },
     {
       id: segmentB,
@@ -150,7 +188,9 @@ export async function seedDemoData(): Promise<void> {
       avgHeight: 12.5,
       slopeTrend: '陡降 68°',
       closed: true,
-      sketchNo: 'S-02'
+      sketchNo: 'S-02',
+      surveyedLength: null,
+      surveyedAt: ''
     }
   ])
 
@@ -168,6 +208,8 @@ export async function seedDemoData(): Promise<void> {
       surveyor: '陆昀',
       date: today,
       isClosurePoint: false,
+      isRemeasured: false,
+      adjusted: null,
       note: '入口段，左壁有崩塌堆积'
     },
     {
@@ -183,6 +225,8 @@ export async function seedDemoData(): Promise<void> {
       surveyor: '陆昀',
       date: today,
       isClosurePoint: true,
+      isRemeasured: false,
+      adjusted: null,
       note: '本段末站，已与 C-02 起点核对'
     }
   ])

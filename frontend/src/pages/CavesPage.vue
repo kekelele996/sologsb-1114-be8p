@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Cave } from '@/types'
-import { segmentLength } from '@/types'
+import { segmentResultLength } from '@/types'
 import { useStore } from '@/hooks/usePersistentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
@@ -39,7 +39,7 @@ function segmentsOf(caveId: string): typeof segmentState.segments {
 }
 
 function totalLength(caveId: string): number {
-  return Math.round(segmentsOf(caveId).reduce((sum, item) => sum + segmentLength(item), 0) * 10) / 10
+  return Math.round(segmentsOf(caveId).reduce((sum, item) => sum + segmentResultLength(item), 0) * 10) / 10
 }
 
 function lastSurveyDate(caveId: string): string {
@@ -105,6 +105,8 @@ async function submit(): Promise<void> {
     surveyor: form.surveyor.trim(),
     climateNote: form.climateNote.trim(),
     archived: existing?.archived ?? false,
+    surveyedLength: existing?.surveyedLength ?? null,
+    surveyedAt: existing?.surveyedAt ?? '',
     createdAt: existing?.createdAt ?? new Date().toISOString()
   }
   await caveStore.getState().save(cave)

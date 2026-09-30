@@ -13,6 +13,12 @@ export interface SegmentState {
   bulkSetClosed: (ids: string[], closed: boolean) => Promise<void>
 }
 
+/** 洞段删除后连带清理其分配版本，并刷新分配 store */
+async function cleanupAdjustments(segmentIds: string[]): Promise<void> {
+  const { adjustmentStore } = await import('@/stores/adjustmentStore')
+  await Promise.all(segmentIds.map((id) => adjustmentStore.getState().removeBySegment(id)))
+}
+
 export const segmentStore = createStore<SegmentState>((set, get) => ({
   segments: [],
   loaded: false,
@@ -27,6 +33,7 @@ export const segmentStore = createStore<SegmentState>((set, get) => ({
   },
   remove: async (id) => {
     await syncDelete<Segment>(db.segments, id)
+    await cleanupAdjustments([id])
     await get().hydrate()
   },
   removeByCave: async (caveId) => {
@@ -34,6 +41,7 @@ export const segmentStore = createStore<SegmentState>((set, get) => ({
       .segments.filter((item) => item.caveId === caveId)
       .map((item) => item.id)
     await db.segments.bulkDelete(ids)
+    await cleanupAdjustments(ids)
     await get().hydrate()
   },
   bulkSetType: async (ids, type) => {
